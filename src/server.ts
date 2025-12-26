@@ -9,6 +9,7 @@ export class LiveServer {
     private httpServer: http.Server | undefined = undefined;
     private wsServer: WebSocketServer | undefined = undefined;
     private port: number = 3000;
+    private spaMode: boolean = false;
     private clients: Set<WebSocket> = new Set();
     private fileWatcher: vscode.Disposable | undefined = undefined;
     private rootPath: string = "";
