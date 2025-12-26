@@ -6,48 +6,48 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ServerConfig, ReloadMessage } from "./types";
 
 export class LiveServer {
-  private httpServer: http.Server | undefined = undefined;
-  private wsServer: WebSocketServer | undefined = undefined;
-  private port: number = 3000;
-  private clients: Set<WebSocket> = new Set();
-  private fileWatcher: vscode.Disposable | undefined = undefined;
-  private rootPath: string = "";
-  private workspacePath: string = "";
-  private config: ServerConfig | undefined = undefined;
-  private outputChannel: vscode.OutputChannel;
+    private httpServer: http.Server | undefined = undefined;
+    private wsServer: WebSocketServer | undefined = undefined;
+    private port: number = 3000;
+    private clients: Set<WebSocket> = new Set();
+    private fileWatcher: vscode.Disposable | undefined = undefined;
+    private rootPath: string = "";
+    private workspacePath: string = "";
+    private config: ServerConfig | undefined = undefined;
+    private outputChannel: vscode.OutputChannel;
 
-  // Cache for in-memory document content
-  private documentCache: Map<string, string> = new Map();
+    // Cache for in-memory document content
+    private documentCache: Map<string, string> = new Map();
 
-  private readonly MIME_TYPES: { [key: string]: string } = {
-    ".html": "text/html",
-    ".css": "text/css",
-    ".js": "application/javascript",
-    ".mjs": "application/javascript",
-    ".json": "application/json",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".svg": "image/svg+xml",
-    ".ico": "image/x-icon",
-    ".webp": "image/webp",
-    ".woff": "font/woff",
-    ".woff2": "font/woff2",
-    ".ttf": "font/ttf",
-    ".eot": "application/vnd.ms-fontobject",
-    ".otf": "font/otf",
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mp3": "audio/mpeg",
-    ".wav": "audio/wav",
-    ".pdf": "application/pdf",
-    ".txt": "text/plain",
-    ".xml": "application/xml",
-    ".webmanifest": "application/manifest+json",
-  };
+    private readonly MIME_TYPES: { [key: string]: string } = {
+        ".html": "text/html",
+        ".css": "text/css",
+        ".js": "application/javascript",
+        ".mjs": "application/javascript",
+        ".json": "application/json",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".ico": "image/x-icon",
+        ".webp": "image/webp",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+        ".ttf": "font/ttf",
+        ".eot": "application/vnd.ms-fontobject",
+        ".otf": "font/otf",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".pdf": "application/pdf",
+        ".txt": "text/plain",
+        ".xml": "application/xml",
+        ".webmanifest": "application/manifest+json",
+    };
 
-  private readonly LIVE_RELOAD_SCRIPT = `
+    private readonly LIVE_RELOAD_SCRIPT = `
     <script>
       (function() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -170,308 +170,274 @@ export class LiveServer {
     </script>
   `;
 
-  constructor() {
-    this.outputChannel = vscode.window.createOutputChannel("Live Server++");
-  }
+    constructor() {
+        this.outputChannel = vscode.window.createOutputChannel("Live Server++");
+    }
 
-  async start(config: ServerConfig): Promise<number> {
-    this.config = config;
-    this.rootPath = config.rootPath;
-    this.workspacePath = config.workspacePath;
-    this.port = await this.findAvailablePort(config.port);
+    async start(config: ServerConfig): Promise<number> {
+        this.config = config;
+        this.rootPath = config.rootPath;
+        this.workspacePath = config.workspacePath;
+        this.port = await this.findAvailablePort(config.port);
 
-    // Initialize document cache with currently open documents
-    this.initializeDocumentCache();
+        // Initialize document cache with currently open documents
+        this.initializeDocumentCache();
 
-    return new Promise((resolve, reject) => {
-      try {
-        // Create HTTP server
-        this.httpServer = http.createServer((req, res) =>
-          this.handleRequest(req, res)
-        );
+        return new Promise((resolve, reject) => {
+            try {
+                // Create HTTP server
+                this.httpServer = http.createServer((req, res) =>
+                    this.handleRequest(req, res)
+                );
 
-        this.httpServer.on("error", (error: NodeJS.ErrnoException) => {
-          if (error.code === "EADDRINUSE") {
-            reject(new Error(`Port ${this.port} is already in use`));
-          } else {
-            reject(error);
-          }
-        });
-
-        this.httpServer.listen(this.port, () => {
-          this.outputChannel.appendLine(
-            `✨ Live Server++ started on http://localhost:${this.port}`
-          );
-          this.outputChannel.appendLine(`📂 Serving: ${this.rootPath}`);
-          this.outputChannel.appendLine(
-            `⚡ Live reload enabled (${config.autoReloadDelay}ms delay)`
-          );
-          this.outputChannel.appendLine(
-            `🔥 Serving unsaved changes in real-time\n`
-          );
-          this.outputChannel.appendLine(
-            `📝 Browser console output will appear below:\n`
-          );
-
-          // Create WebSocket server for live reload
-          if (this.httpServer) {
-            this.wsServer = new WebSocketServer({
-              server: this.httpServer,
-              path: "/__live_reload",
-            });
-
-            this.wsServer.on("connection", (ws: WebSocket) => {
-              if (config.verboseLogging) {
-                this.outputChannel.appendLine("[Verbose] Browser connected");
-              }
-              this.clients.add(ws);
-
-              ws.on("message", (data: Buffer) => {
-                if (config.showConsoleLog) {
-                  try {
-                    const message = JSON.parse(data.toString());
-                    if (message.type === "console") {
-                      // Filter out Live Server's own internal logs
-                      const output = message.args.join(" ");
-                      if (!output.includes("[Live Server++]")) {
-                        const prefix = `[${message.method.toUpperCase()}]`;
-                        this.outputChannel.appendLine(`${prefix} ${output}`);
-                      }
+                this.httpServer.on("error", (error: NodeJS.ErrnoException) => {
+                    if (error.code === "EADDRINUSE") {
+                        reject(new Error(`Port ${this.port} is already in use`));
+                    } else {
+                        reject(error);
                     }
-                  } catch (e) {
-                    // Ignore parse errors
-                  }
-                }
-              });
+                });
 
-              ws.on("close", () => {
-                if (config.verboseLogging) {
-                  this.outputChannel.appendLine(
-                    "[Verbose] Browser disconnected"
-                  );
-                }
-                this.clients.delete(ws);
-              });
-            });
-          }
+                this.httpServer.listen(this.port, () => {
+                    this.outputChannel.appendLine(
+                        `✨ Live Server++ started on http://localhost:${this.port}`
+                    );
+                    this.outputChannel.appendLine(`📂 Serving: ${this.rootPath}`);
+                    this.outputChannel.appendLine(
+                        `⚡ Live reload enabled (${config.autoReloadDelay}ms delay)`
+                    );
+                    this.outputChannel.appendLine(
+                        `🔥 Serving unsaved changes in real-time\n`
+                    );
+                    this.outputChannel.appendLine(
+                        `📝 Browser console output will appear below:\n`
+                    );
 
-          // Setup file watcher with auto-reload
-          this.setupAutoReload();
+                    // Create WebSocket server for live reload
+                    if (this.httpServer) {
+                        this.wsServer = new WebSocketServer({
+                            server: this.httpServer,
+                            path: "/__live_reload",
+                        });
 
-          resolve(this.port);
+                        this.wsServer.on("connection", (ws: WebSocket) => {
+                            if (config.verboseLogging) {
+                                this.outputChannel.appendLine("[Verbose] Browser connected");
+                            }
+                            this.clients.add(ws);
+
+                            ws.on("message", (data: Buffer) => {
+                                if (config.showConsoleLog) {
+                                    try {
+                                        const message = JSON.parse(data.toString());
+                                        if (message.type === "console") {
+                                            // Filter out Live Server's own internal logs
+                                            const output = message.args.join(" ");
+                                            if (!output.includes("[Live Server++]")) {
+                                                const prefix = `[${message.method.toUpperCase()}]`;
+                                                this.outputChannel.appendLine(`${prefix} ${output}`);
+                                            }
+                                        }
+                                    } catch (e) {
+                                        // Ignore parse errors
+                                    }
+                                }
+                            });
+
+                            ws.on("close", () => {
+                                if (config.verboseLogging) {
+                                    this.outputChannel.appendLine(
+                                        "[Verbose] Browser disconnected"
+                                    );
+                                }
+                                this.clients.delete(ws);
+                            });
+                        });
+                    }
+
+                    // Setup file watcher with auto-reload
+                    this.setupAutoReload();
+
+                    resolve(this.port);
+                });
+            } catch (error) {
+                reject(error);
+            }
         });
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  private initializeDocumentCache(): void {
-    // Cache all currently open text documents
-    vscode.workspace.textDocuments.forEach((doc) => {
-      if (
-        doc.uri.scheme === "file" &&
-        doc.uri.fsPath.startsWith(this.workspacePath)
-      ) {
-        this.documentCache.set(doc.uri.fsPath, doc.getText());
-      }
-    });
-  }
-
-  private async findAvailablePort(startPort: number): Promise<number> {
-    let port = startPort;
-    const maxAttempts = 100;
-
-    for (let i = 0; i < maxAttempts; i++) {
-      if (await this.isPortAvailable(port)) {
-        return port;
-      }
-      port++;
     }
 
-    throw new Error("No available ports found");
-  }
-
-  private isPortAvailable(port: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const server = http.createServer();
-
-      server.once("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EADDRINUSE") {
-          resolve(false);
-        } else {
-          resolve(false);
-        }
-      });
-
-      server.once("listening", () => {
-        server.close();
-        resolve(true);
-      });
-
-      server.listen(port);
-    });
-  }
-
-  private handleRequest(
-    req: http.IncomingMessage,
-    res: http.ServerResponse
-  ): void {
-    try {
-      // Add CORS headers if enabled
-      if (this.config?.enableCORS) {
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader(
-          "Access-Control-Allow-Methods",
-          "GET, POST, PUT, DELETE, OPTIONS"
-        );
-        res.setHeader(
-          "Access-Control-Allow-Headers",
-          "Content-Type, Authorization"
-        );
-
-        if (req.method === "OPTIONS") {
-          res.writeHead(204);
-          res.end();
-          return;
-        }
-      }
-
-      // Parse URL and remove query strings
-      let urlPath = req.url?.split("?")[0] || "/";
-
-      // Default to index.html for root
-      if (urlPath === "/") {
-        urlPath = "/index.html";
-      }
-
-      // Construct file path
-      let filePath = path.join(this.rootPath, urlPath);
-
-      // Security check: prevent directory traversal
-      const normalizedPath = path.normalize(filePath);
-      if (!normalizedPath.startsWith(this.rootPath)) {
-        this.sendError(res, 403, "Forbidden", "Access denied");
-        return;
-      }
-
-      // Check if we have this file in memory cache (unsaved changes)
-      let content: Buffer | undefined = undefined;
-      let fromCache = false;
-
-      if (this.documentCache.has(normalizedPath)) {
-        // Serve from in-memory cache (unsaved content)
-        content = Buffer.from(this.documentCache.get(normalizedPath)!, "utf-8");
-        fromCache = true;
-      } else {
-        // Check if file exists on disk
-        if (!fs.existsSync(filePath)) {
-          // Try with .html extension
-          if (!path.extname(filePath)) {
-            const htmlPath = filePath + ".html";
-            if (fs.existsSync(htmlPath)) {
-              filePath = htmlPath;
-            } else if (this.documentCache.has(htmlPath)) {
-              filePath = htmlPath;
-              content = Buffer.from(this.documentCache.get(htmlPath)!, "utf-8");
-              fromCache = true;
-            } else {
-              this.send404(res, urlPath);
-              return;
+    private initializeDocumentCache(): void {
+        // Cache all currently open text documents
+        vscode.workspace.textDocuments.forEach((doc) => {
+            if (
+                doc.uri.scheme === "file" &&
+                doc.uri.fsPath.startsWith(this.workspacePath)
+            ) {
+                this.documentCache.set(doc.uri.fsPath, doc.getText());
             }
-          } else {
-            this.send404(res, urlPath);
-            return;
-          }
-        }
-
-        // If not from cache yet, check if it's a directory
-        if (!fromCache) {
-          const stat = fs.statSync(filePath);
-          if (stat.isDirectory()) {
-            const indexPath = path.join(filePath, "index.html");
-            if (fs.existsSync(indexPath)) {
-              filePath = indexPath;
-            } else if (this.documentCache.has(indexPath)) {
-              filePath = indexPath;
-              content = Buffer.from(
-                this.documentCache.get(indexPath)!,
-                "utf-8"
-              );
-              fromCache = true;
-            } else {
-              this.sendDirectoryListing(res, filePath, urlPath);
-              return;
-            }
-          }
-        }
-
-        // Read from disk if not from cache
-        if (!fromCache && !content) {
-          content = fs.readFileSync(filePath);
-        }
-      }
-
-      // If still no content, return 404
-      if (!content) {
-        this.send404(res, urlPath);
-        return;
-      }
-
-      const ext = path.extname(filePath).toLowerCase();
-      const mimeType = this.MIME_TYPES[ext] || "application/octet-stream";
-
-      // Inject live reload script for HTML files
-      if (ext === ".html") {
-        let htmlContent = content.toString("utf-8");
-
-        // Inject before closing body tag or at the end
-        if (htmlContent.includes("</body>")) {
-          htmlContent = htmlContent.replace(
-            "</body>",
-            `${this.LIVE_RELOAD_SCRIPT}</body>`
-          );
-        } else if (htmlContent.includes("</html>")) {
-          htmlContent = htmlContent.replace(
-            "</html>",
-            `${this.LIVE_RELOAD_SCRIPT}</html>`
-          );
-        } else {
-          htmlContent += this.LIVE_RELOAD_SCRIPT;
-        }
-
-        content = Buffer.from(htmlContent, "utf-8");
-      }
-
-      res.writeHead(200, {
-        "Content-Type": mimeType,
-        "Content-Length": content.length,
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        Pragma: "no-cache",
-        Expires: "0",
-        "X-Content-Type-Options": "nosniff",
-        "X-Served-From": fromCache ? "memory" : "disk",
-      });
-      res.end(content);
-    } catch (error) {
-      console.error("Error handling request:", error);
-      this.sendError(
-        res,
-        500,
-        "Internal Server Error",
-        "An error occurred while processing your request"
-      );
+        });
     }
-  }
 
-  private sendError(
-    res: http.ServerResponse,
-    statusCode: number,
-    title: string,
-    message: string
-  ): void {
-    res.writeHead(statusCode, { "Content-Type": "text/html" });
-    res.end(`
+    private async findAvailablePort(startPort: number): Promise<number> {
+        let port = startPort;
+        const maxAttempts = 100;
+
+        for (let i = 0; i < maxAttempts; i++) {
+            if (await this.isPortAvailable(port)) {
+                return port;
+            }
+            port++;
+        }
+
+        throw new Error("No available ports found");
+    }
+
+    private isPortAvailable(port: number): Promise<boolean> {
+        return new Promise((resolve) => {
+            const server = http.createServer();
+
+            server.once("error", (err: NodeJS.ErrnoException) => {
+                if (err.code === "EADDRINUSE") {
+                    resolve(false);
+                } else {
+                    resolve(false);
+                }
+            });
+
+            server.once("listening", () => {
+                server.close();
+                resolve(true);
+            });
+
+            server.listen(port);
+        });
+    }
+
+    private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+        try {
+            // 1. Handle CORS
+            if (this.config?.enableCORS) {
+                res.setHeader("Access-Control-Allow-Origin", "*");
+                res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+                res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+                if (req.method === "OPTIONS") {
+                    res.writeHead(204);
+                    res.end();
+                    return;
+                }
+            }
+
+            // 2. Clean the URL
+            const urlPath = req.url?.split("?")[0] || "/";
+            let targetPath = path.join(this.rootPath, urlPath);
+
+            // Security check
+            if (!path.normalize(targetPath).startsWith(this.rootPath)) {
+                this.sendError(res, 403, "Forbidden", "Access denied");
+                return;
+            }
+
+            // 3. The "Realistic" Resolution Logic
+            let resolvedPath: string | null = null;
+            let isDirectory = false;
+
+            if (fs.existsSync(targetPath)) {
+                const stats = fs.statSync(targetPath);
+                if (stats.isDirectory()) {
+                    const indexHtml = path.join(targetPath, "index.html");
+                    if (fs.existsSync(indexHtml)) {
+                        resolvedPath = indexHtml;
+                    } else {
+                        isDirectory = true; // Will trigger directory listing later
+                    }
+                } else {
+                    resolvedPath = targetPath;
+                }
+            }
+
+            // 4. Pretty URL Check (Try adding .html if not found)
+            if (!resolvedPath && !isDirectory) {
+                const prettyPath = targetPath + ".html";
+                if (fs.existsSync(prettyPath)) {
+                    resolvedPath = prettyPath;
+                }
+            }
+
+            // 5. Final Dispatch
+            if (resolvedPath) {
+                this.serveRealFile(res, resolvedPath, 200);
+            } else if (isDirectory) {
+                this.sendDirectoryListing(res, targetPath, urlPath);
+            } else {
+                // 6. Realistic 404/SPA Logic
+                if (this.config?.spaMode) {
+                    const spaRoot = path.join(this.rootPath, "index.html");
+                    this.serveRealFile(res, spaRoot, 200);
+                } else {
+                    const custom404 = path.join(this.rootPath, "404.html");
+                    if (fs.existsSync(custom404)) {
+                        this.serveRealFile(res, custom404, 404);
+                    } else {
+                        this.send404(res, urlPath);
+                    }
+                }
+            }
+        } catch (error) {
+            this.sendError(res, 500, "Internal Server Error", "Check console for details");
+        }
+    }
+
+    /**
+     * Helper to serve content with script injection and correct status codes
+     */
+    private serveRealFile(res: http.ServerResponse, filePath: string, statusCode: number): void {
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeType = this.MIME_TYPES[ext] || "application/octet-stream";
+
+        // Check memory cache first (for as-you-type updates)
+        let content: Buffer;
+        let fromCache = false;
+
+        if (this.documentCache.has(filePath)) {
+            content = Buffer.from(this.documentCache.get(filePath)!, "utf-8");
+            fromCache = true;
+        } else {
+            content = fs.readFileSync(filePath);
+        }
+
+        let finalBody: Buffer | string = content;
+
+        // Inject Live Reload into HTML
+        if (ext === ".html") {
+            let html = content.toString("utf-8");
+            const script = this.LIVE_RELOAD_SCRIPT;
+
+            if (html.includes("</body>")) {
+                html = html.replace("</body>", `${script}</body>`);
+            } else {
+                html += script;
+            }
+            finalBody = Buffer.from(html, "utf-8");
+        }
+
+        res.writeHead(statusCode, {
+            "Content-Type": mimeType,
+            "Content-Length": Buffer.byteLength(finalBody),
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Served-By": "Live-Server-Realistic",
+            "X-Cache-Hit": fromCache ? "true" : "false"
+        });
+
+        res.end(finalBody);
+    }
+    private sendError(
+        res: http.ServerResponse,
+        statusCode: number,
+        title: string,
+        message: string
+    ): void {
+        res.writeHead(statusCode, { "Content-Type": "text/html" });
+        res.end(`
       <!DOCTYPE html>
       <html>
         <head>
@@ -534,11 +500,11 @@ export class LiveServer {
         </body>
       </html>
     `);
-  }
+    }
 
-  private send404(res: http.ServerResponse, requestedPath: string): void {
-    res.writeHead(404, { "Content-Type": "text/html" });
-    res.end(`
+    private send404(res: http.ServerResponse, requestedPath: string): void {
+        res.writeHead(404, { "Content-Type": "text/html" });
+        res.end(`
       <!DOCTYPE html>
       <html>
         <head>
@@ -625,45 +591,45 @@ export class LiveServer {
         </body>
       </html>
     `);
-  }
-
-  private findSimilarFiles(requestedPath: string): string[] {
-    try {
-      const dir = path.dirname(path.join(this.rootPath, requestedPath));
-      if (!fs.existsSync(dir)) return [];
-
-      const files = fs.readdirSync(dir);
-      const requestedFile = path.basename(requestedPath).toLowerCase();
-
-      // Find files with similar names
-      const similar = files
-        .filter((file) => {
-          const fileLower = file.toLowerCase();
-          return (
-            fileLower.includes(requestedFile.slice(0, 3)) ||
-            requestedFile.includes(fileLower.slice(0, 3))
-          );
-        })
-        .slice(0, 5)
-        .map((file) =>
-          path.join(path.dirname(requestedPath), file).replace(/\\/g, "/")
-        );
-
-      return similar;
-    } catch (error) {
-      return [];
     }
-  }
 
-  private sendDirectoryListing(
-    res: http.ServerResponse,
-    dirPath: string,
-    urlPath: string
-  ): void {
-    try {
-      const files = fs.readdirSync(dirPath);
+    private findSimilarFiles(requestedPath: string): string[] {
+        try {
+            const dir = path.dirname(path.join(this.rootPath, requestedPath));
+            if (!fs.existsSync(dir)) return [];
 
-      let html = `
+            const files = fs.readdirSync(dir);
+            const requestedFile = path.basename(requestedPath).toLowerCase();
+
+            // Find files with similar names
+            const similar = files
+                .filter((file) => {
+                    const fileLower = file.toLowerCase();
+                    return (
+                        fileLower.includes(requestedFile.slice(0, 3)) ||
+                        requestedFile.includes(fileLower.slice(0, 3))
+                    );
+                })
+                .slice(0, 5)
+                .map((file) =>
+                    path.join(path.dirname(requestedPath), file).replace(/\\/g, "/")
+                );
+
+            return similar;
+        } catch (error) {
+            return [];
+        }
+    }
+
+    private sendDirectoryListing(
+        res: http.ServerResponse,
+        dirPath: string,
+        urlPath: string
+    ): void {
+        try {
+            const files = fs.readdirSync(dirPath);
+
+            let html = `
         <!DOCTYPE html>
         <html>
           <head>
@@ -730,10 +696,10 @@ export class LiveServer {
               <ul>
       `;
 
-      // Add parent directory link
-      if (urlPath !== "/") {
-        const parentPath = path.dirname(urlPath);
-        html += `
+            // Add parent directory link
+            if (urlPath !== "/") {
+                const parentPath = path.dirname(urlPath);
+                html += `
           <li>
             <a href="${parentPath}">
               <span class="icon">📁</span>
@@ -741,29 +707,29 @@ export class LiveServer {
             </a>
           </li>
         `;
-      }
+            }
 
-      // Sort: folders first, then files
-      const sorted = files.sort((a, b) => {
-        const aPath = path.join(dirPath, a);
-        const bPath = path.join(dirPath, b);
-        const aIsDir = fs.statSync(aPath).isDirectory();
-        const bIsDir = fs.statSync(bPath).isDirectory();
+            // Sort: folders first, then files
+            const sorted = files.sort((a, b) => {
+                const aPath = path.join(dirPath, a);
+                const bPath = path.join(dirPath, b);
+                const aIsDir = fs.statSync(aPath).isDirectory();
+                const bIsDir = fs.statSync(bPath).isDirectory();
 
-        if (aIsDir && !bIsDir) return -1;
-        if (!aIsDir && bIsDir) return 1;
-        return a.localeCompare(b);
-      });
+                if (aIsDir && !bIsDir) return -1;
+                if (!aIsDir && bIsDir) return 1;
+                return a.localeCompare(b);
+            });
 
-      sorted.forEach((file) => {
-        const fullPath = path.join(dirPath, file);
-        const stat = fs.statSync(fullPath);
-        const isDir = stat.isDirectory();
-        const href = path.join(urlPath, file).replace(/\\/g, "/");
-        const icon = isDir ? "📁" : "📄";
-        const className = isDir ? "folder" : "file";
+            sorted.forEach((file) => {
+                const fullPath = path.join(dirPath, file);
+                const stat = fs.statSync(fullPath);
+                const isDir = stat.isDirectory();
+                const href = path.join(urlPath, file).replace(/\\/g, "/");
+                const icon = isDir ? "📁" : "📄";
+                const className = isDir ? "folder" : "file";
 
-        html += `
+                html += `
           <li>
             <a href="${href}">
               <span class="icon ${className}">${icon}</span>
@@ -771,179 +737,179 @@ export class LiveServer {
             </a>
           </li>
         `;
-      });
+            });
 
-      html += `
+            html += `
               </ul>
             </div>
           </body>
         </html>
       `;
 
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(html);
-    } catch (error) {
-      this.sendError(
-        res,
-        500,
-        "Internal Server Error",
-        "Error reading directory"
-      );
+            res.writeHead(200, { "Content-Type": "text/html" });
+            res.end(html);
+        } catch (error) {
+            this.sendError(
+                res,
+                500,
+                "Internal Server Error",
+                "Error reading directory"
+            );
+        }
     }
-  }
 
-  private setupAutoReload(): void {
-    if (!this.config) return;
+    private setupAutoReload(): void {
+        if (!this.config) return;
 
-    const debounceTimers = new Map<string, NodeJS.Timeout>();
+        const debounceTimers = new Map<string, NodeJS.Timeout>();
 
-    // Listen to text document changes (as you type)
-    const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
-      const doc = event.document;
+        // Listen to text document changes (as you type)
+        const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
+            const doc = event.document;
 
-      // Only watch files in workspace
-      if (!doc.uri.fsPath.startsWith(this.workspacePath)) return;
+            // Only watch files in workspace
+            if (!doc.uri.fsPath.startsWith(this.workspacePath)) return;
 
-      const ext = path.extname(doc.fileName).toLowerCase();
+            const ext = path.extname(doc.fileName).toLowerCase();
 
-      // Only watch relevant files
-      if (![".html", ".css", ".js", ".json"].includes(ext)) return;
+            // Only watch relevant files
+            if (![".html", ".css", ".js", ".json"].includes(ext)) return;
 
-      // Update document cache with latest content
-      this.documentCache.set(doc.uri.fsPath, doc.getText());
+            // Update document cache with latest content
+            this.documentCache.set(doc.uri.fsPath, doc.getText());
 
-      // Clear existing timer for this file
-      const existingTimer = debounceTimers.get(doc.uri.fsPath);
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-      }
+            // Clear existing timer for this file
+            const existingTimer = debounceTimers.get(doc.uri.fsPath);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+            }
 
-      // Set new debounced timer
-      const timer = setTimeout(() => {
-        if (this.config!.verboseLogging) {
-          this.outputChannel.appendLine(
-            `[Verbose] File changed: ${path.basename(doc.fileName)}`
-          );
-        }
+            // Set new debounced timer
+            const timer = setTimeout(() => {
+                if (this.config!.verboseLogging) {
+                    this.outputChannel.appendLine(
+                        `[Verbose] File changed: ${path.basename(doc.fileName)}`
+                    );
+                }
 
-        // CSS gets hot-reloaded, others trigger full reload
-        if (ext === ".css") {
-          this.sendToClients({
-            type: "css-update",
-            file: path.basename(doc.fileName),
-          });
-        } else {
-          this.sendToClients({ type: "reload" });
-        }
+                // CSS gets hot-reloaded, others trigger full reload
+                if (ext === ".css") {
+                    this.sendToClients({
+                        type: "css-update",
+                        file: path.basename(doc.fileName),
+                    });
+                } else {
+                    this.sendToClients({ type: "reload" });
+                }
 
-        debounceTimers.delete(doc.uri.fsPath);
-      }, this.config!.autoReloadDelay);
+                debounceTimers.delete(doc.uri.fsPath);
+            }, this.config!.autoReloadDelay);
 
-      debounceTimers.set(doc.uri.fsPath, timer);
-    });
+            debounceTimers.set(doc.uri.fsPath, timer);
+        });
 
-    // Listen when documents are saved
-    const saveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
-      if (
-        doc.uri.fsPath.startsWith(this.workspacePath) &&
-        this.config!.verboseLogging
-      ) {
-        this.outputChannel.appendLine(
-          `[Verbose] File saved: ${path.basename(doc.fileName)}`
+        // Listen when documents are saved
+        const saveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
+            if (
+                doc.uri.fsPath.startsWith(this.workspacePath) &&
+                this.config!.verboseLogging
+            ) {
+                this.outputChannel.appendLine(
+                    `[Verbose] File saved: ${path.basename(doc.fileName)}`
+                );
+            }
+        });
+
+        // Listen when documents are closed (remove from cache)
+        const closeListener = vscode.workspace.onDidCloseTextDocument((doc) => {
+            if (doc.uri.fsPath.startsWith(this.workspacePath)) {
+                this.documentCache.delete(doc.uri.fsPath);
+                if (this.config!.verboseLogging) {
+                    this.outputChannel.appendLine(
+                        `[Verbose] Document closed: ${path.basename(doc.fileName)}`
+                    );
+                }
+            }
+        });
+
+        // Also watch for file system changes (for images, etc.)
+        const pattern = new vscode.RelativePattern(
+            this.workspacePath,
+            "**/*.{png,jpg,jpeg,gif,svg,webp,ico}"
         );
-      }
-    });
+        const fsWatcher = vscode.workspace.createFileSystemWatcher(pattern);
 
-    // Listen when documents are closed (remove from cache)
-    const closeListener = vscode.workspace.onDidCloseTextDocument((doc) => {
-      if (doc.uri.fsPath.startsWith(this.workspacePath)) {
-        this.documentCache.delete(doc.uri.fsPath);
-        if (this.config!.verboseLogging) {
-          this.outputChannel.appendLine(
-            `[Verbose] Document closed: ${path.basename(doc.fileName)}`
-          );
-        }
-      }
-    });
+        const handleFSChange = (uri: vscode.Uri) => {
+            if (this.config!.verboseLogging) {
+                this.outputChannel.appendLine(
+                    `[Verbose] Asset changed: ${path.basename(uri.fsPath)}`
+                );
+            }
+            this.sendToClients({ type: "reload" });
+        };
 
-    // Also watch for file system changes (for images, etc.)
-    const pattern = new vscode.RelativePattern(
-      this.workspacePath,
-      "**/*.{png,jpg,jpeg,gif,svg,webp,ico}"
-    );
-    const fsWatcher = vscode.workspace.createFileSystemWatcher(pattern);
+        fsWatcher.onDidChange(handleFSChange);
+        fsWatcher.onDidCreate(handleFSChange);
+        fsWatcher.onDidDelete(handleFSChange);
 
-    const handleFSChange = (uri: vscode.Uri) => {
-      if (this.config!.verboseLogging) {
-        this.outputChannel.appendLine(
-          `[Verbose] Asset changed: ${path.basename(uri.fsPath)}`
+        // Store disposables
+        this.fileWatcher = vscode.Disposable.from(
+            changeListener,
+            saveListener,
+            closeListener,
+            fsWatcher
         );
-      }
-      this.sendToClients({ type: "reload" });
-    };
-
-    fsWatcher.onDidChange(handleFSChange);
-    fsWatcher.onDidCreate(handleFSChange);
-    fsWatcher.onDidDelete(handleFSChange);
-
-    // Store disposables
-    this.fileWatcher = vscode.Disposable.from(
-      changeListener,
-      saveListener,
-      closeListener,
-      fsWatcher
-    );
-  }
-
-  private sendToClients(message: ReloadMessage): void {
-    const messageStr = JSON.stringify(message);
-    this.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(messageStr);
-      }
-    });
-  }
-
-  stop(): void {
-    // Close all WebSocket connections
-    this.clients.forEach((client) => {
-      client.close();
-    });
-    this.clients.clear();
-
-    // Close WebSocket server
-    if (this.wsServer) {
-      this.wsServer.close();
-      this.wsServer = undefined;
     }
 
-    // Close HTTP server
-    if (this.httpServer) {
-      this.httpServer.close();
-      this.httpServer = undefined;
+    private sendToClients(message: ReloadMessage): void {
+        const messageStr = JSON.stringify(message);
+        this.clients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(messageStr);
+            }
+        });
     }
 
-    // Dispose file watcher
-    if (this.fileWatcher) {
-      this.fileWatcher.dispose();
-      this.fileWatcher = undefined;
+    stop(): void {
+        // Close all WebSocket connections
+        this.clients.forEach((client) => {
+            client.close();
+        });
+        this.clients.clear();
+
+        // Close WebSocket server
+        if (this.wsServer) {
+            this.wsServer.close();
+            this.wsServer = undefined;
+        }
+
+        // Close HTTP server
+        if (this.httpServer) {
+            this.httpServer.close();
+            this.httpServer = undefined;
+        }
+
+        // Dispose file watcher
+        if (this.fileWatcher) {
+            this.fileWatcher.dispose();
+            this.fileWatcher = undefined;
+        }
+
+        // Clear document cache
+        this.documentCache.clear();
+
+        this.outputChannel.appendLine("\n🛑 Live Server++ stopped");
     }
 
-    // Clear document cache
-    this.documentCache.clear();
+    getPort(): number {
+        return this.port;
+    }
 
-    this.outputChannel.appendLine("\n🛑 Live Server++ stopped");
-  }
+    isRunning(): boolean {
+        return this.httpServer !== undefined;
+    }
 
-  getPort(): number {
-    return this.port;
-  }
-
-  isRunning(): boolean {
-    return this.httpServer !== undefined;
-  }
-
-  getOutputChannel(): vscode.OutputChannel {
-    return this.outputChannel;
-  }
+    getOutputChannel(): vscode.OutputChannel {
+        return this.outputChannel;
+    }
 }
